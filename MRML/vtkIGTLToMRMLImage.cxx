@@ -28,7 +28,6 @@
 // MRML includes
 #include <vtkMRMLScalarVolumeNode.h>
 #include <vtkMRMLScalarVolumeDisplayNode.h>
-#include <vtkMRMLVectorVolumeNode.h>
 #include <vtkMRMLVectorVolumeDisplayNode.h>
 
 // VTK includes
@@ -36,6 +35,7 @@
 #include <vtkIntArray.h>
 #include <vtkMatrix4x4.h>
 #include <vtkObjectFactory.h>
+#include <vtkSmartPointer.h>
 
 // VTKSYS includes
 #include <vtksys/SystemTools.hxx>
@@ -63,6 +63,59 @@ void vtkIGTLToMRMLImage::PrintSelf(ostream& os, vtkIndent indent)
 }
 
 //---------------------------------------------------------------------------
+void vtkIGTLToMRMLImage::SetDefaultDisplayNode(vtkMRMLVolumeNode *volumeNode, int numberOfComponents)
+{
+  if (volumeNode==NULL)
+    {
+    vtkWarningMacro("Failed to create display node for volume node");
+    return;
+    }
+
+  vtkMRMLScene* scene=volumeNode->GetScene();
+  if (scene==NULL)
+    {
+    vtkWarningMacro("Failed to create display node for "<<(volumeNode->GetID()?volumeNode->GetID():"unknown volume node")<<": scene is invalid");
+    return;
+    }
+  if (numberOfComponents!=1 && numberOfComponents!=3)
+    {
+    vtkWarningMacro("Failed to create display node for "<<(volumeNode->GetID()?volumeNode->GetID():"unknown volume node")
+      <<": only 1 or 3 scalar components are supported, received: "<<numberOfComponents);
+    return;
+    }
+
+  // If the input is a 3-component image then we assume it is a color image,
+  // and we display it in true color. For true color display we need to use
+  // a vtkMRMLVectorVolumeDisplayNode.
+  bool scalarDisplayNodeRequired = (numberOfComponents==1);
+  vtkSmartPointer<vtkMRMLVolumeDisplayNode> displayNode;
+  if (scalarDisplayNodeRequired)
+    {
+    displayNode = vtkSmartPointer<vtkMRMLScalarVolumeDisplayNode>::New();
+    }
+  else
+    {
+    displayNode = vtkSmartPointer<vtkMRMLVectorVolumeDisplayNode>::New();
+    }
+
+  scene->AddNode(displayNode);
+
+  if (scalarDisplayNodeRequired)
+    {
+    const char* colorTableId = vtkMRMLColorLogic::GetColorTableNodeID(vtkMRMLColorTableNode::Grey);
+    displayNode->SetAndObserveColorNodeID(colorTableId);
+    }
+  else
+    {
+    displayNode->SetDefaultColorMap();
+    }
+
+  volumeNode->SetAndObserveDisplayNodeID(displayNode->GetID());
+
+  vtkDebugMacro("Display node "<<displayNode->GetClassName());
+}
+
+//---------------------------------------------------------------------------
 vtkMRMLNode* vtkIGTLToMRMLImage::CreateNewNodeWithMessage(vtkMRMLScene* scene, const char* name, igtl::MessageBase::Pointer incomingImageMessage)
 {
   igtl::MessageBase* innerPtr = incomingImageMessage.GetPointer();
@@ -86,31 +139,8 @@ vtkMRMLNode* vtkIGTLToMRMLImage::CreateNewNodeWithMessage(vtkMRMLScene* scene, c
     return 0;
     }
 
-  int numberOfComponents = imgMsg->GetNumComponents();
-
-  vtkMRMLVolumeNode *volumeNode = NULL;
-  vtkMRMLVolumeDisplayNode *displayNode = NULL;
-  if (numberOfComponents==1)
-    {
-    volumeNode = vtkMRMLScalarVolumeNode::New();
-    displayNode = vtkMRMLScalarVolumeDisplayNode::New();
-    }
-  else if (numberOfComponents==3)
-    {
-    // if the input is a 3-component image then we assume it is 
-    // a color image, which has to be loaded into a vtkMRMLVectorVolumeNode
-    // to show it as an RGB image
-    volumeNode = vtkMRMLVectorVolumeNode::New();
-    displayNode = vtkMRMLVectorVolumeDisplayNode::New();
-    }
-  else
-    {
-    vtkErrorMacro("Unable to create MRML node from incoming IMAGE message. Number of components must be 1 or 3, received: "<<numberOfComponents);
-    return 0;
-    }
-
-  vtkImageData* image = vtkImageData::New();
-
+  vtkSmartPointer<vtkImageData> image = vtkSmartPointer<vtkImageData>::New();
+  int numberOfComponents=imgMsg->GetNumComponents();
   //float fov = 256.0;
   image->SetDimensions(256, 256, 1);
   image->SetExtent(0, 255, 0, 255, 0, 0 );
@@ -129,17 +159,15 @@ vtkMRMLNode* vtkIGTLToMRMLImage::CreateNewNodeWithMessage(vtkMRMLScene* scene, c
     image->Update();
     }
 
+  vtkSmartPointer<vtkMRMLVolumeNode> volumeNode = vtkSmartPointer<vtkMRMLScalarVolumeNode>::New();
   volumeNode->SetAndObserveImageData(image);
-
   volumeNode->SetName(name);
+
   scene->SaveStateForUndo();
 
   vtkDebugMacro("Setting scene info");
   volumeNode->SetScene(scene);
   volumeNode->SetDescription("Received by OpenIGTLink");
-
-  displayNode->SetScene(scene);
-
 
   ///double range[2];
   vtkDebugMacro("Set basic display info");
@@ -152,30 +180,15 @@ vtkMRMLNode* vtkIGTLToMRMLImage::CreateNewNodeWithMessage(vtkMRMLScene* scene, c
   //displayNode->SetLevel(0.5 * (range[1] + range[0]) );
 
   vtkDebugMacro("Adding node..");
-  scene->AddNode(displayNode);
-
-  if( numberOfComponents == 1 )
-    {
-    const char* colorTableId = vtkMRMLColorLogic::GetColorTableNodeID(vtkMRMLColorTableNode::Grey);
-    displayNode->SetAndObserveColorNodeID(colorTableId);
-    }
-  else
-    {
-    displayNode->SetDefaultColorMap();
-    }
-
-  volumeNode->SetAndObserveDisplayNodeID(displayNode->GetID());
 
   vtkDebugMacro("Name vol node "<<volumeNode->GetClassName());
-  vtkDebugMacro("Display node "<<displayNode->GetClassName());
-
   vtkMRMLNode* n = scene->AddNode(volumeNode);
-  vtkDebugMacro("Node added to scene");
-  this->CenterImage(volumeNode);
 
-  volumeNode->Delete();
-  displayNode->Delete();
-  image->Delete();
+  SetDefaultDisplayNode(volumeNode, numberOfComponents);
+
+  vtkDebugMacro("Node added to scene");
+
+  this->CenterImage(volumeNode);
 
   return n;
 }
@@ -256,25 +269,6 @@ int vtkIGTLToMRMLImage::IGTLToMRML(igtl::MessageBase::Pointer buffer, vtkMRMLNod
     return 0;
     }
 
-  if (vtkMRMLVectorVolumeNode::SafeDownCast(volumeNode)!=NULL)
-    {
-    // vector volume node
-    if (imgMsg->GetNumComponents()!=3)
-      {
-      vtkErrorMacro("vtkIGTLToMRMLImage::IGTLToMRML failed: "<<volumeNode->GetID()<<" expected 3 scalar components, received an image with "<<imgMsg->GetNumComponents()<<" scalar component(s).");
-      return 0;
-      }
-    }
-  else
-    {
-    // scalar volume node
-    if (imgMsg->GetNumComponents()!=1)
-      {
-      vtkErrorMacro("vtkIGTLToMRMLImage::IGTLToMRML failed: "<<volumeNode->GetID()<<" expected 1 scalar component, received an image with "<<imgMsg->GetNumComponents()<<" scalar component(s).");
-      return 0;
-      }
-    }
-
   // Retrive the image data
   int   size[3];          // image dimension
   float spacing[3];       // spacing (mm/pixel)
@@ -293,33 +287,68 @@ int vtkIGTLToMRMLImage::IGTLToMRML(igtl::MessageBase::Pointer buffer, vtkMRMLNod
   imgMsg->GetSubVolume(svsize, svoffset);
   imgMsg->GetMatrix(matrix);
 
-  // check if the IGTL data fits to the current MRML node
-  vtkImageData* imageData;
-  vtkImageData* newImageData = NULL;
-  
-  int dsize[3]={0,0,0};
-  int dscalarType=VTK_VOID;
-
+  // check if the IGTL data fits to the current MRML node  
+  int sizeInNode[3]={0,0,0};
+  int scalarTypeInNode=VTK_VOID;
+  int numComponentsInNode=0;
   // Get vtk image from MRML node
-  imageData = volumeNode->GetImageData();
-  if (imageData)
+  vtkSmartPointer<vtkImageData> imageData = volumeNode->GetImageData();
+  if (imageData.GetPointer()!=NULL)
     {
-    imageData->GetDimensions(dsize);
-    dscalarType = imageData->GetScalarType();
+    imageData->GetDimensions(sizeInNode);
+    scalarTypeInNode = imageData->GetScalarType();
+    numComponentsInNode = imageData->GetNumberOfScalarComponents();
     }
 
-  if (dsize[0] != size[0] || dsize[1] != size[1] || dsize[2] != size[2] ||
-      scalarType != dscalarType)
+  if (imageData.GetPointer()==NULL
+      || sizeInNode[0] != size[0] || sizeInNode[1] != size[1] || sizeInNode[2] != size[2]
+      || scalarType != scalarTypeInNode
+      || numComponentsInNode != numComponents)
     {
-    newImageData = vtkImageData::New();
-    newImageData->SetDimensions(size[0], size[1], size[2]);
-    newImageData->SetExtent(0, size[0]-1, 0, size[1]-1, 0, size[2]-1);
-    newImageData->SetOrigin(0.0, 0.0, 0.0);
-    newImageData->SetSpacing(1.0, 1.0, 1.0);
-    newImageData->SetNumberOfScalarComponents(numComponents);
-    newImageData->SetScalarType(scalarType);
-    newImageData->AllocateScalars();
-    imageData = newImageData;
+
+    if (numComponentsInNode != numComponents)
+      {
+      // number of components changed, so we need to remove the incompatible
+      // dispay nodes and create a default display node if no compatible display
+      // node remains
+
+      bool scalarDisplayNodeRequired = (numComponents==1);
+      bool mayNeedToRemoveDisplayNodes=false;
+      do
+        {
+        mayNeedToRemoveDisplayNodes=false;
+        for (int i=0; i<volumeNode->GetNumberOfDisplayNodes(); i++)
+          {
+          vtkMRMLVolumeDisplayNode* currentDisplayNode = vtkMRMLVolumeDisplayNode::SafeDownCast(volumeNode->GetNthDisplayNode(i));
+          bool currentDisplayNodeIsScalar = (vtkMRMLVectorVolumeDisplayNode::SafeDownCast(currentDisplayNode)==NULL);
+          if (scalarDisplayNodeRequired!=currentDisplayNodeIsScalar)
+            {
+            // incompatible display node, remove it
+            //volumeNode->RemoveNthDisplayNodeID(i);
+            volumeNode->GetScene()->RemoveNode(currentDisplayNode);
+            mayNeedToRemoveDisplayNodes=true;
+            }
+          }
+        }
+      while (mayNeedToRemoveDisplayNodes);
+      
+      if (volumeNode->GetNumberOfDisplayNodes()==0)
+        {
+        // the new defaul display node may be incompatible with the current image data,
+        // so clear it to make sure no display is attempted with incompatible image data
+        volumeNode->SetAndObserveImageData(NULL);
+        SetDefaultDisplayNode(volumeNode, numComponents);
+        }
+      }
+
+    imageData = vtkSmartPointer<vtkImageData>::New();
+    imageData->SetDimensions(size[0], size[1], size[2]);
+    imageData->SetExtent(0, size[0]-1, 0, size[1]-1, 0, size[2]-1);
+    imageData->SetOrigin(0.0, 0.0, 0.0);
+    imageData->SetSpacing(1.0, 1.0, 1.0);
+    imageData->SetNumberOfScalarComponents(numComponents);
+    imageData->SetScalarType(scalarType);
+    imageData->AllocateScalars();
     }
 
   float tx = matrix[0][0];
@@ -512,11 +541,7 @@ int vtkIGTLToMRMLImage::IGTLToMRML(igtl::MessageBase::Pointer buffer, vtkMRMLNod
   volumeNode->SetIJKToRASMatrix(rtimgTransform);
   rtimgTransform->Delete();
 
-  if (newImageData)
-    {
-    volumeNode->SetAndObserveImageData(newImageData);
-    newImageData->Delete();
-    }
+  volumeNode->SetAndObserveImageData(imageData);
 
   imageData->Modified();
   volumeNode->Modified();
