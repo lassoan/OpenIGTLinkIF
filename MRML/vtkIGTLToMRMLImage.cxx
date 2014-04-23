@@ -28,6 +28,8 @@
 // MRML includes
 #include <vtkMRMLScalarVolumeNode.h>
 #include <vtkMRMLScalarVolumeDisplayNode.h>
+#include <vtkMRMLVectorVolumeNode.h>
+#include <vtkMRMLVectorVolumeDisplayNode.h>
 
 // VTK includes
 #include <vtkImageData.h>
@@ -63,25 +65,50 @@ void vtkIGTLToMRMLImage::PrintSelf(ostream& os, vtkIndent indent)
 //---------------------------------------------------------------------------
 vtkMRMLNode* vtkIGTLToMRMLImage::CreateNewNodeWithMessage(vtkMRMLScene* scene, const char* name, igtl::MessageBase::Pointer incomingImageMessage)
 {
-  vtkMRMLScalarVolumeDisplayNode *displayNode(NULL);
-  int numberOfComponents = 1;
-
-  if( incomingImageMessage.GetPointer() != NULL )
+  igtl::MessageBase* innerPtr = incomingImageMessage.GetPointer();
+  if( innerPtr == NULL )
     {
-    igtl::MessageBase* innerPtr = incomingImageMessage.GetPointer();
-    igtl::ImageMessage* imgMsg = dynamic_cast<igtl::ImageMessage*>(innerPtr);
-    
-    if( imgMsg == NULL )
-      {
-      vtkWarningMacro("Unable to cast incoming message to image message. Defaulting display node to greyscale.");
-      }
-    else
-      {
-      numberOfComponents = imgMsg->GetNumComponents();
-      }
+    vtkErrorMacro("Unable to create MRML node from incoming IMAGE message: incomingImageMessage is invalid");
+    return 0;
     }
 
-  vtkMRMLScalarVolumeNode *scalarNode = vtkMRMLScalarVolumeNode::New();
+  igtl::ImageMessage::Pointer imgMsg = igtl::ImageMessage::New();
+  // As this method is only called when the first image message is received,
+  // (it is called when receiving each image message) the performance impact of the
+  // additional Copy() and Unpack() method calls are negligible.
+  imgMsg->Copy(incomingImageMessage.GetPointer());
+  // Deserialize the transform data
+  // If CheckCRC==0, CRC check is skipped.
+  int c = imgMsg->Unpack(this->CheckCRC);
+  if ((c & igtl::MessageHeader::UNPACK_BODY) == 0) // if CRC check fails
+    {
+    vtkErrorMacro("Unable to create MRML node from incoming IMAGE message. Failed to unpack the message");
+    return 0;
+    }
+
+  int numberOfComponents = imgMsg->GetNumComponents();
+
+  vtkMRMLVolumeNode *volumeNode = NULL;
+  vtkMRMLVolumeDisplayNode *displayNode = NULL;
+  if (numberOfComponents==1)
+    {
+    volumeNode = vtkMRMLScalarVolumeNode::New();
+    displayNode = vtkMRMLScalarVolumeDisplayNode::New();
+    }
+  else if (numberOfComponents==3)
+    {
+    // if the input is a 3-component image then we assume it is 
+    // a color image, which has to be loaded into a vtkMRMLVectorVolumeNode
+    // to show it as an RGB image
+    volumeNode = vtkMRMLVectorVolumeNode::New();
+    displayNode = vtkMRMLVectorVolumeDisplayNode::New();
+    }
+  else
+    {
+    vtkErrorMacro("Unable to create MRML node from incoming IMAGE message. Number of components must be 1 or 3, received: "<<numberOfComponents);
+    return 0;
+    }
+
   vtkImageData* image = vtkImageData::New();
 
   //float fov = 256.0;
@@ -102,67 +129,51 @@ vtkMRMLNode* vtkIGTLToMRMLImage::CreateNewNodeWithMessage(vtkMRMLScene* scene, c
     image->Update();
     }
 
-  scalarNode->SetAndObserveImageData(image);
+  volumeNode->SetAndObserveImageData(image);
 
-  /* Based on the code in vtkSlicerVolumeLogic::AddHeaderVolume() */
-  //displayNode = vtkMRMLVolumeDisplayNode::New();
-  displayNode = vtkMRMLScalarVolumeDisplayNode::New();
-  scalarNode->SetLabelMap(0);
+  volumeNode->SetName(name);
+  scene->SaveStateForUndo();
 
-  vtkMRMLNode* n = NULL;
+  vtkDebugMacro("Setting scene info");
+  volumeNode->SetScene(scene);
+  volumeNode->SetDescription("Received by OpenIGTLink");
 
-  if (scalarNode != NULL)
+  displayNode->SetScene(scene);
+
+
+  ///double range[2];
+  vtkDebugMacro("Set basic display info");
+  //volumeNode->GetImageData()->GetScalarRange(range);
+  //range[0] = 0.0;
+  //range[1] = 256.0;
+  //displayNode->SetLowerThreshold(range[0]);
+  //displayNode->SetUpperThreshold(range[1]);
+  //displayNode->SetWindow(range[1] - range[0]);
+  //displayNode->SetLevel(0.5 * (range[1] + range[0]) );
+
+  vtkDebugMacro("Adding node..");
+  scene->AddNode(displayNode);
+
+  if( numberOfComponents == 1 )
     {
-    scalarNode->SetName(name);
-    scene->SaveStateForUndo();
-
-    vtkDebugMacro("Setting scene info");
-    scalarNode->SetScene(scene);
-    scalarNode->SetDescription("Received by OpenIGTLink");
-
-    displayNode->SetScene(scene);
-
-
-    ///double range[2];
-    vtkDebugMacro("Set basic display info");
-    //scalarNode->GetImageData()->GetScalarRange(range);
-    //range[0] = 0.0;
-    //range[1] = 256.0;
-    //displayNode->SetLowerThreshold(range[0]);
-    //displayNode->SetUpperThreshold(range[1]);
-    //displayNode->SetWindow(range[1] - range[0]);
-    //displayNode->SetLevel(0.5 * (range[1] + range[0]) );
-
-    vtkDebugMacro("Adding node..");
-    scene->AddNode(displayNode);
-
-    //displayNode->SetDefaultColorMap();
-    //vtkSlicerColorLogic *colorLogic = vtkSlicerColorLogic::New();
-    if (this->GetOpenIGTLinkIFLogic() && this->GetOpenIGTLinkIFLogic()->GetApplicationLogic())
-      {
-      vtkMRMLColorLogic *colorLogic = this->GetOpenIGTLinkIFLogic()->GetApplicationLogic()->GetColorLogic();
-      const char* colorTableId = NULL;
-      if( numberOfComponents == 1 )
-        {
-        colorTableId = vtkMRMLColorLogic::GetColorTableNodeID(vtkMRMLColorTableNode::Grey);
-        }
-      else
-        {
-        colorTableId = vtkMRMLColorLogic::GetColorTableNodeID(vtkMRMLColorTableNode::Rainbow);
-        }
-      displayNode->SetAndObserveColorNodeID(colorTableId);
-      scalarNode->SetAndObserveDisplayNodeID(displayNode->GetID());
-      }
-
-    vtkDebugMacro("Name vol node "<<scalarNode->GetClassName());
-    vtkDebugMacro("Display node "<<displayNode->GetClassName());
-
-    n = scene->AddNode(scalarNode);
-    vtkDebugMacro("Node added to scene");
-    this->CenterImage(scalarNode);
+    const char* colorTableId = vtkMRMLColorLogic::GetColorTableNodeID(vtkMRMLColorTableNode::Grey);
+    displayNode->SetAndObserveColorNodeID(colorTableId);
+    }
+  else
+    {
+    displayNode->SetDefaultColorMap();
     }
 
-  scalarNode->Delete();
+  volumeNode->SetAndObserveDisplayNodeID(displayNode->GetID());
+
+  vtkDebugMacro("Name vol node "<<volumeNode->GetClassName());
+  vtkDebugMacro("Display node "<<displayNode->GetClassName());
+
+  vtkMRMLNode* n = scene->AddNode(volumeNode);
+  vtkDebugMacro("Node added to scene");
+  this->CenterImage(volumeNode);
+
+  volumeNode->Delete();
   displayNode->Delete();
   image->Delete();
 
@@ -223,9 +234,10 @@ int swapCopy64(igtlUint64 * dst, igtlUint64 * src, int n)
 //---------------------------------------------------------------------------
 int vtkIGTLToMRMLImage::IGTLToMRML(igtl::MessageBase::Pointer buffer, vtkMRMLNode* node)
 {
-  if (strcmp(node->GetNodeTagName(), "Volume") != 0)
+  vtkMRMLVolumeNode* volumeNode = vtkMRMLVolumeNode::SafeDownCast(node);
+  if (volumeNode==NULL)
     {
-    //std::cerr << "Invalid node!!!!" << std::endl;
+    vtkErrorMacro("vtkIGTLToMRMLImage::IGTLToMRML failed: invalid node");
     return 0;
     }
 
@@ -244,9 +256,23 @@ int vtkIGTLToMRMLImage::IGTLToMRML(igtl::MessageBase::Pointer buffer, vtkMRMLNod
     return 0;
     }
 
-  if (node == NULL)
+  if (vtkMRMLVectorVolumeNode::SafeDownCast(volumeNode)!=NULL)
     {
-    return 0;
+    // vector volume node
+    if (imgMsg->GetNumComponents()!=3)
+      {
+      vtkErrorMacro("vtkIGTLToMRMLImage::IGTLToMRML failed: "<<volumeNode->GetID()<<" expected 3 scalar components, received an image with "<<imgMsg->GetNumComponents()<<" scalar component(s).");
+      return 0;
+      }
+    }
+  else
+    {
+    // scalar volume node
+    if (imgMsg->GetNumComponents()!=1)
+      {
+      vtkErrorMacro("vtkIGTLToMRMLImage::IGTLToMRML failed: "<<volumeNode->GetID()<<" expected 1 scalar component, received an image with "<<imgMsg->GetNumComponents()<<" scalar component(s).");
+      return 0;
+      }
     }
 
   // Retrive the image data
@@ -268,7 +294,6 @@ int vtkIGTLToMRMLImage::IGTLToMRML(igtl::MessageBase::Pointer buffer, vtkMRMLNod
   imgMsg->GetMatrix(matrix);
 
   // check if the IGTL data fits to the current MRML node
-  vtkMRMLScalarVolumeNode* volumeNode = vtkMRMLScalarVolumeNode::SafeDownCast(node);
   vtkImageData* imageData;
   vtkImageData* newImageData = NULL;
   
